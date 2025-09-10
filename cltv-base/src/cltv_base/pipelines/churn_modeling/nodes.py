@@ -1,242 +1,171 @@
-# src/cltv_base/pipelines/churn_modeling/nodes.py
-
 import pandas as pd
-from typing import Tuple, Dict, List
+import numpy as np
+from typing import Tuple, Dict, List, Any
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 from lifelines import CoxPHFitter
 
+# Supported Metrics
 
-def get_customers_at_risk(customer_level_df: pd.DataFrame, at_risk_threshold_days: int) -> pd.DataFrame:
-    """
-    Identifies customers at risk based on recency.
-    This function acts as a Kedro node.
-    Args:
-        customer_level_df: DataFrame with customer-level features including 'recency'.
-        at_risk_threshold_days: Threshold in days for considering a customer 'at risk'.
-    Returns:
-        DataFrame of customers identified as at risk.
-    """
-    print(f"Identifying customers at risk (recency > {at_risk_threshold_days} days)...")
-    if customer_level_df.empty or 'recency' not in customer_level_df.columns:
-        print("Warning: Missing 'recency' or empty DataFrame for customers at risk. Returning empty DataFrame.")
-        return pd.DataFrame(columns=customer_level_df.columns) # Return empty with original columns
-    return customer_level_df[customer_level_df['recency'] > at_risk_threshold_days]
+METRICS_SUPPORTED = 'rfm_score'
 
-def label_churned_customers(customer_df: pd.DataFrame, churn_inactive_days_threshold: int) -> pd.DataFrame:
-    """
-    Labels customers as churned based on recency.
-    This function acts as a Kedro node.
-    Args:
-        customer_df: DataFrame with customer-level features including 'recency'.
-        churn_inactive_days_threshold: Threshold in days for labeling a customer as 'churned'.
-    Returns:
-        DataFrame with an added 'is_churned' column.
-    """
-    print(f"Labeling churned customers (recency > {churn_inactive_days_threshold} days)...")
-    df = customer_df.copy()
-    if df.empty or 'recency' not in df.columns:
-        print("Warning: Missing 'recency' or empty DataFrame for churn labeling. Returning original DataFrame with 'is_churned' set to 0.")
-        if 'is_churned' not in df.columns:
-            df['is_churned'] = 0
-        return df
+# Distribution-based Threshold Calculation
+
+def calculate_all_distribution_thresholds(customer_df: pd.DataFrame, metrics: str = None) -> float:
     
-    df['is_churned'] = (df['recency'] > churn_inactive_days_threshold).astype(int)
-    
-    # --- Diagnostic Print ---
-    churned_count = df['is_churned'].sum()
-    total_customers = len(df)
-    print(f"Diagnostic: Labeled {churned_count} out of {total_customers} customers as churned.")
-    if total_customers > 0 and churned_count == 0:
-        print("WARNING: No customers were labeled as churned. Consider adjusting 'churn_inactive_days_threshold'.")
-    # --- End Diagnostic Print ---
+    if metrics is None:
+        metrics = 'rfm_score'
+    thresholds = {}
+    for metric in metrics:
+        if customer_df.empty or metric not in customer_df.columns:
+            print(f"[WARN] No data or '{metric}' missing. Using threshold=0")
+            thresholds[f"{metric}_threshold"] = 0
+        else:
+            values = customer_df[metric]
+            lower = values.quantile(0.10)
+            upper = values.quantile(0.90)
+            filtered = values[(values >= lower) & (values <= upper)]
+            threshold_value = float(filtered.quantile(0.25))
+            print(f"[INFO] {metric} threshold calculated: {threshold_value:.2f}")
+            thresholds = threshold_value
+    return thresholds
 
+# User-Defined Value Threshold
+
+def calculate_user_value_threshold(metric: str, user_value: float) -> dict:
+    
+    print(f"[INFO] User set {metric} threshold: {user_value:.2f}")
+    return {f"{metric}_threshold": user_value}
+
+# ML-Based Threshold Calculation (Stub for future)
+
+def calculate_ml_based_threshold(customer_df: pd.DataFrame, metric: str) -> dict:
+    
+    print(f"[WARN] ML threshold for '{metric}' not implemented. Using default value = 0.")
+    return {f"{metric}_threshold": 0}
+
+# Get Customers At Risk 
+
+def get_customers_at_risk(customer_df: pd.DataFrame) -> pd.DataFrame:
+    
+    df = customer_df[customer_df['is_churned'] == 1]
     return df
 
-def get_churn_features_labels(customer_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Extracts features and labels for churn prediction.
-    Ensures 'User ID' is the index for X and y to maintain mapping.
-    This function acts as a Kedro node.
-    Args:
-        customer_df: DataFrame containing customer-level features and 'is_churned' label.
-    Returns:
-        Tuple of DataFrames (features X, labels y).
-    """
-    print("Extracting churn features and labels...")
-    
-    # Ensure 'User ID' is present and set as index
-    if 'User ID' not in customer_df.columns:
-        raise ValueError("customer_df must contain 'User ID' column for churn feature extraction.")
-    
-    # Create a copy and set 'User ID' as the index
-    df_indexed = customer_df.set_index('User ID', drop=False) 
+# Label Churned Customers (for any metric)
 
+def label_churned_customers(customer_df: pd.DataFrame, metric: str, inactive_days_threshold: float) -> pd.DataFrame:
+    
+    df = customer_df.copy()
+    metric_name = metric
+    threshold_value = inactive_days_threshold
+
+    df['is_churned'] = (df[metric_name] < threshold_value).astype(int)
+        
+    churned_count = df['is_churned'].sum()
+    print(f"[INFO] Labeled {churned_count} customers as churned by '{metric_name}' with the threshold {threshold_value}.")
+    print("columns name", df.columns)
+    return df
+
+# Feature & Label Extraction, Model Training, Prediction — (unchanged from your code)
+
+def get_churn_features_labels(customer_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if 'User ID' not in customer_df.columns:
+        raise ValueError("'User ID' column is required.")
+    df = customer_df.set_index('User ID', drop=False)
     feature_cols = [
         'frequency', 'monetary', 'aov',
-        'avg_days_between_orders', 'CLTV_30d', 'CLTV_60d', 'CLTV_90d'
+        'avg_days_between_orders', 'CLTV_30d', 'CLTV_60d', 'CLTV_90d', 'recency'
     ]
-    
-    # Ensure all feature columns exist before selection
-    existing_feature_cols = [col for col in feature_cols if col in df_indexed.columns] # Corrected: was feature_indexed.columns
-    if len(existing_feature_cols) < len(feature_cols):
-        missing_cols = set(feature_cols) - set(existing_feature_cols)
-        print(f"Warning: Missing churn feature columns: {missing_cols}. Using available features.")
-    
-    X = df_indexed[existing_feature_cols]
-    y = df_indexed['is_churned']
-    
-    # --- Diagnostic Print ---
-    print(f"Diagnostic: get_churn_features_labels - X index sample:\n{X.index[:5].tolist()}")
-    print(f"Diagnostic: get_churn_features_labels - y (is_churned) value counts:\n{y.value_counts()}")
-    # --- End Diagnostic Print ---
+    available_cols = [c for c in feature_cols if c in df.columns]
+    if len(available_cols) < len(feature_cols):
+        print(f"[WARN] Missing features: {set(feature_cols) - set(available_cols)}")
+    X = df[available_cols]
+    y = df[['is_churned']]
+    return X, y
 
-    return X, y.to_frame() # y.to_frame() is fine, it will inherit the index
-
-
-def train_churn_prediction_model(X: pd.DataFrame, y: pd.DataFrame, n_estimators: int, random_state: int) -> Tuple[RandomForestClassifier, Dict, List, pd.DataFrame, pd.DataFrame]:
-    """
-    Trains a RandomForestClassifier for churn prediction.
-    This function acts as a Kedro node.
-    Args:
-        X: Feature DataFrame.
-        y: Label DataFrame ('is_churned').
-        n_estimators: Number of trees in the RandomForest.
-        random_state: Random state for reproducibility.
-    Returns:
-        Tuple of (trained model, classification report, feature importances, X_test, y_test).
-    """
-    print("Training churn prediction model...")
+def train_churn_prediction_model(
+    X: pd.DataFrame, y: pd.DataFrame, n_estimators: int, random_state: int
+) -> Tuple[RandomForestClassifier, Dict, List, pd.DataFrame, pd.DataFrame]:
+    
     if X.empty or y.empty:
-        print("Warning: X or y DataFrame is empty for churn model training. Returning empty results.")
-        # Return dummy values to prevent downstream errors
+        print("[WARN] Empty features or labels. Returning dummy model.")
         dummy_model = RandomForestClassifier(n_estimators=1, random_state=random_state)
-        dummy_report = {"accuracy": 0.0, "precision": {"0": 0.0, "1": 0.0}, "recall": {"0": 0.0, "1": 0.0}, "f1-score": {"0": 0.0, "1": 0.0}}
-        dummy_importances = []
-        dummy_X_test = pd.DataFrame(columns=X.columns)
-        dummy_y_test = pd.DataFrame(columns=y.columns)
-        return dummy_model, dummy_report, dummy_importances, dummy_X_test, dummy_y_test
-
-    # X and y should already have 'User ID' as index from get_churn_features_labels
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=random_state)
+        return dummy_model, {}, [], pd.DataFrame(), pd.DataFrame()
     
-    # --- Diagnostic Print ---
-    print(f"Diagnostic: train_churn_prediction_model - y_train (is_churned) value counts:\n{y_train.value_counts()}")
-    if y_train['is_churned'].sum() == 0:
-        print("WARNING: No churned customers in training data. Model will likely predict no churn.")
-    # --- End Diagnostic Print ---
-
+    # Check if the target variable has more than one unique class.
+    # If not, the model cannot be trained for binary classification.
+    if y.nunique().max() < 2:
+        print("[WARN] The target variable 'y' contains only a single class. The model will not be able to predict churn.")
+        dummy_model = RandomForestClassifier(n_estimators=1, random_state=random_state)
+        return dummy_model, {}, [], X, y
+        
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.4, random_state=random_state
+    )
     model = RandomForestClassifier(n_estimators=n_estimators, random_state=random_state)
-    model.fit(X_train, y_train.values.ravel()) # .values.ravel() flattens the DataFrame to a 1D array
-    report = classification_report(y_test, model.predict(X_test), output_dict=True)
+    model.fit(X_train, y_train.values.ravel())
+    
+    # 
+    # **- CHANGE START -**
+    # 
+    # Get predictions on the test set
+    y_pred = model.predict(X_test)
+    
+    # Add predicted labels to the test features DataFrame for later use
+    X_test['predicted_churn_label'] = y_pred
+    
+    report = classification_report(y_test, y_pred, output_dict=True)
+    # 
+    # **- CHANGE END -**
+    # 
     importances = model.feature_importances_.tolist()
     return model, report, importances, X_test, y_test
 
 def predict_churn_probabilities(model: RandomForestClassifier, X: pd.DataFrame) -> pd.DataFrame:
-    """
-    Predicts churn probabilities using the trained model.
-    This function acts as a Kedro node.
-    Args:
-        model: Trained RandomForestClassifier model.
-        X: Feature DataFrame for prediction.
-    Returns:
-        DataFrame with 'User ID' and 'predicted_churn_prob'.
-    """
-    print("Predicting churn probabilities...")
     if X.empty:
-        print("Warning: X DataFrame is empty for churn probability prediction. Returning empty DataFrame.")
         return pd.DataFrame(columns=['User ID', 'predicted_churn_prob'])
 
-    # X's index should be 'User ID' from upstream node (get_churn_features_labels)
-    prob_df = pd.DataFrame(model.predict_proba(X)[:, 1], index=X.index, columns=['predicted_churn_prob'])
-    prob_df.index.name = 'User ID' # Explicitly name the index
-    prob_df = prob_df.reset_index() # Convert index to column
-    prob_df['User ID'] = prob_df['User ID'].astype(str) # Ensure User ID is string
-    
-    # --- Diagnostic Print ---
-    print(f"Diagnostic: predict_churn_probabilities - predicted_churn_prob describe:\n{prob_df['predicted_churn_prob'].describe()}")
-    print(f"Diagnostic: predict_churn_probabilities - User ID sample:\n{prob_df['User ID'].head().tolist()}")
-    # --- End Diagnostic Print ---
+    try:
+        # **- CHANGE START -**
+        # Ensure correct class probability is selected if class order changes
+        churn_class_index = list(model.classes_).index(1)
+        probs = model.predict_proba(X)[:, churn_class_index]
+        # **- CHANGE END -**
 
-    return prob_df
+    except IndexError:
+        print("Warning: Model was trained on a single class. Predicting probabilities accordingly.")
+        
+        if model.classes_[0] == 1:
+            probs = model.predict_proba(X)[:, 0]
+        else:
+            probs = np.zeros(len(X))
+
+    predictions = pd.DataFrame(data={
+        'User ID': X.index,  
+        'predicted_churn_prob': probs
+    })
+
+    return predictions
 
 def assign_predicted_churn_labels(predicted_churn_prob: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """
-    Assigns binary churn labels based on a probability threshold.
-    This function acts as a Kedro node.
-    Args:
-        predicted_churn_prob: DataFrame with 'User ID' and 'predicted_churn_prob'.
-        threshold: Probability threshold to classify as churned.
-    Returns:
-        DataFrame with 'User ID' and 'predicted_churn'.
-    """
-    print("Assigning predicted churn labels...")
-    if predicted_churn_prob.empty or 'predicted_churn_prob' not in predicted_churn_prob.columns:
-        print("Warning: Missing 'predicted_churn_prob' or empty DataFrame for churn labels. Returning empty DataFrame.")
+    if predicted_churn_prob.empty:
         return pd.DataFrame(columns=['User ID', 'predicted_churn'])
+    predicted_churn_prob = predicted_churn_prob.copy()
+    predicted_churn_prob['predicted_churn'] = (
+        predicted_churn_prob['predicted_churn_prob'] >= threshold
+    ).astype(int)
+    return predicted_churn_prob[['User ID', 'predicted_churn']]
 
-    # Use the 'User ID' column from predicted_churn_prob directly and create the new column
-    churn_labels_df = predicted_churn_prob[['User ID']].copy() # Start with User ID
-    churn_labels_df['predicted_churn'] = (predicted_churn_prob['predicted_churn_prob'] >= threshold).astype(int)
-    churn_labels_df['User ID'] = churn_labels_df['User ID'].astype(str) # Ensure User ID is string
-    
-    # --- Diagnostic Print ---
-    print(f"Diagnostic: assign_predicted_churn_labels - predicted_churn value counts:\n{churn_labels_df['predicted_churn'].value_counts()}")
-    print(f"Diagnostic: assign_predicted_churn_labels - User ID sample:\n{churn_labels_df['User ID'].head().tolist()}")
-    if churn_labels_df['predicted_churn'].sum() == 0:
-        print("WARNING: No customers predicted as churned. Consider adjusting 'predicted_churn_probability_threshold'.")
-    # --- End Diagnostic Print ---
-
-    return churn_labels_df
-
-def prepare_survival_data(customer_df: pd.DataFrame, churn_inactive_days_threshold: int) -> pd.DataFrame:
-    """
-    Adds 'duration' and 'event' for survival analysis.
-    This function acts as a Kedro node.
-    Args:
-        customer_df: DataFrame with customer-level features including 'lifespan_1d' and 'recency'.
-        churn_inactive_days_threshold: Threshold in days for labeling a customer as 'churned' (event).
-    Returns:
-        DataFrame with 'duration' and 'event' columns added.
-    """
-    print("Preparing survival data...")
+def train_cox_survival_model(customer_df: pd.DataFrame, feature_col: List[str]) -> Tuple[CoxPHFitter, pd.DataFrame]:
     df = customer_df.copy()
-    if df.empty or 'lifespan_1d' not in df.columns or 'recency' not in df.columns:
-        print("Warning: Missing required columns or empty DataFrame for survival data. Returning empty DataFrame.")
-        return pd.DataFrame(columns=df.columns.tolist() + ['duration', 'event'])
     
-    df['duration'] = df['lifespan_1d']
-    df['event'] = (df['recency'] > churn_inactive_days_threshold).astype(int)
-    return df
-
-def train_cox_survival_model(customer_df: pd.DataFrame, feature_cols: List[str]) -> Tuple[CoxPHFitter, pd.DataFrame]:
-    """
-    Trains Cox Proportional Hazards model for churn time prediction.
-    Returns trained model and predicted expected churn times.
-    This function acts as a Kedro node.
-    Args:
-        customer_df: DataFrame with customer-level features, 'duration', and 'event'.
-        feature_cols: List of feature columns to use for the Cox model.
-    Returns:
-        Tuple of (trained CoxPHFitter model, DataFrame with 'expected_active_days' added).
-    """
-    print("Training Cox survival model...")
-    df = customer_df.copy()
-    cph = CoxPHFitter()
-
-    required_cols = feature_cols + ['duration', 'event']
+    required_cols = feature_col + ['lifespan_1d', 'is_churned']
     if df.empty or not all(col in df.columns for col in required_cols):
-        missing = [col for col in required_cols if col not in df.columns]
-        print(f"Warning: Missing required columns for Cox model training: {missing} or empty DataFrame. Returning original DataFrame with 'expected_active_days' set to 0.")
-        if 'expected_active_days' not in df.columns:
-            df['expected_active_days'] = 0
-        return cph, df # Return dummy cph and original df
-
-    survival_df = df[required_cols]
-    cph.fit(survival_df, duration_col='duration', event_col='event')
-
-    # Ensure 'User ID' is string type before returning
-    df['User ID'] = df['User ID'].astype(str)
-    df['expected_active_days'] = cph.predict_expectation(survival_df).round(0).astype(int)
+        print("[WARN] Missing survival model columns.")
+        return CoxPHFitter(), df
+    cph = CoxPHFitter()
+    cph.fit(df[required_cols], duration_col='lifespan_1d', event_col='is_churned')
+    df['expected_active_days'] = cph.predict_expectation(df[feature_col]).round(0).astype(int)
+    #df.to_csv("expected_active_days.csv", index=False)
     return cph, df
